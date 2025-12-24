@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+opencv-python
+numpy
+ultralytics
+PyMySQL
+pydantic
+email-validator
+passlib[bcrypt]
+python-jose[cryptography]
