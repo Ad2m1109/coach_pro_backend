@@ -73,10 +73,8 @@ class FlowAnalysisService:
                     "metrics_b": analysis.get("team_b", {}),
                 })
             
-            # Use the TacticalAdvisor's new advise_flow method
-            # (Note: advise_flow is sync, so we run it in a thread if needed, 
-            # but call_remote_llm_sync handles the internal loop)
-            flow_result = cls._advisor.advise_flow(summaries)
+            # Use the TacticalAdvisor's advise_flow method (async)
+            flow_result = await cls._advisor.advise_flow(summaries)
             
             return {
                 "type": "flow_analysis",

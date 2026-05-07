@@ -48,6 +48,8 @@ class SegmentService:
                         recommendation TEXT,
                         severity_score DECIMAL(5,4) DEFAULT 0.0,
                         severity_label VARCHAR(32) DEFAULT 'LOW',
+                        video_path    VARCHAR(255) NULL,
+                        heatmap_path  VARCHAR(255) NULL,
                         status        ENUM('PENDING','PROCESSING','COMPLETED','FAILED','EMPTY') DEFAULT 'PENDING',
                         created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         INDEX idx_analysis_segment (analysis_id, segment_index),
@@ -67,6 +69,15 @@ class SegmentService:
                 except Exception:
                     # Already compatible.
                     pass
+
+                    cursor.execute(
+                        "ALTER TABLE analysis_segments ADD COLUMN video_path VARCHAR(255) NULL AFTER severity_label"
+                    )
+
+                if not SegmentService._has_column(cursor, "heatmap_path"):
+                    cursor.execute(
+                        "ALTER TABLE analysis_segments ADD COLUMN heatmap_path VARCHAR(255) NULL AFTER video_path"
+                    )
 
                 SegmentService._drop_match_fk_if_present(cursor)
 
@@ -152,6 +163,8 @@ class SegmentService:
         recommendation: Optional[str] = None,
         severity_score: float = 0.0,
         severity_label: str = "LOW",
+        video_path: Optional[str] = None,
+        heatmap_path: Optional[str] = None,
         status: str = "COMPLETED",
     ) -> dict:
         """Insert a single segment row and return its data dict."""
@@ -166,8 +179,8 @@ class SegmentService:
                     INSERT INTO analysis_segments
                         (id, analysis_id, match_id, segment_index, start_sec, end_sec,
                          video_start_sec, analysis_json, recommendation,
-                         severity_score, severity_label, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         severity_score, severity_label, video_path, heatmap_path, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         seg_id,
@@ -181,6 +194,8 @@ class SegmentService:
                         recommendation,
                         severity_score,
                         severity_label,
+                        video_path,
+                        heatmap_path,
                         status,
                     ),
                 )
@@ -200,6 +215,8 @@ class SegmentService:
             "recommendation": recommendation,
             "severity_score": severity_score,
             "severity_label": severity_label,
+            "video_path": video_path,
+            "heatmap_path": heatmap_path,
             "status": status,
         }
 
@@ -217,7 +234,7 @@ class SegmentService:
                     """
                     SELECT id, analysis_id, match_id, segment_index, start_sec, end_sec,
                            video_start_sec, analysis_json, recommendation,
-                           severity_score, severity_label, status, created_at
+                           severity_score, severity_label, video_path, heatmap_path, status, created_at
                     FROM analysis_segments
                     WHERE analysis_id = %s
                     ORDER BY segment_index ASC
@@ -240,7 +257,7 @@ class SegmentService:
                     """
                     SELECT id, analysis_id, match_id, segment_index, start_sec, end_sec,
                            video_start_sec, analysis_json, recommendation,
-                           severity_score, severity_label, status, created_at
+                           severity_score, severity_label, video_path, heatmap_path, status, created_at
                     FROM analysis_segments
                     WHERE match_id = %s
                     ORDER BY segment_index ASC
@@ -275,6 +292,8 @@ class SegmentService:
                     "recommendation": row.get("recommendation"),
                     "severity_score": float(row.get("severity_score", 0) or 0),
                     "severity_label": row.get("severity_label", "LOW"),
+                    "video_path": row.get("video_path"),
+                    "heatmap_path": row.get("heatmap_path"),
                     "status": row.get("status", "PENDING"),
                     "created_at": str(row.get("created_at")) if row.get("created_at") else None,
                 }

@@ -24,7 +24,11 @@ def load_backend_env() -> None:
         key = key.strip()
         value = value.strip()
 
-        if not key or key in os.environ:
+        if not key:
+            continue
+            
+        # Overwrite if missing OR if current value is empty (to handle empty env vars from Docker)
+        if key in os.environ and os.environ[key].strip():
             continue
 
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:

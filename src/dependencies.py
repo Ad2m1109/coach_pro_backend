@@ -16,7 +16,7 @@ RSA_PRIVATE_KEY = get_jwt_private_key()
 RSA_PUBLIC_KEY = get_jwt_public_key()
 
 ALGORITHM = "RS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 # 24 hours for dev convenience
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/token")
 
@@ -25,7 +25,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, RSA_PRIVATE_KEY, algorithm=ALGORITHM)
     return encoded_jwt

@@ -37,6 +37,7 @@ from models.user import User
 from analysis_engine import FootballAnalyzer
 from services.tracking_engine_client import TrackingEngineClient
 from services.flow_analysis_service import FlowAnalysisService
+from services.redis_notifier import RedisNotifier
 
 # --- Configuration for JWT (RS256 - Public Key Verification Only) --- #
 import os
@@ -242,6 +243,11 @@ def _ensure_analysis_run_columns(db: Connection):
             db.commit()
         except Exception:
             db.rollback()
+        try:
+            cursor.execute("ALTER TABLE analysis_runs ADD COLUMN total_segments INT DEFAULT 0")
+            db.commit()
+        except Exception:
+            db.rollback()
 
 
 def _create_analysis_run(
@@ -398,46 +404,72 @@ async def run_tracking_analysis_job(
     try:
         _update_analysis_run(job_id, ANALYSIS_STATUS_PROCESSING, 0.05, "Submitting video to tracking engine...")
 
+        processed_segments = set()
+
+        async def handle_segment_data(seg_data):
+            """Process a single segment's data and push to listeners."""
+            seg_index = seg_data.get("segment_index", 0)
+            if seg_index in processed_segments:
+                return
+            
+            try:
+                from services.segment_service import SegmentService
+                from controllers.segment_controller import push_analysis_segment_event
+
+                saved = SegmentService.insert_segment(
+                    analysis_id=job_id,
+                    match_id=match_id,
+                    segment_index=seg_index,
+                    start_sec=seg_data.get("start_sec", 0),
+                    end_sec=seg_data.get("end_sec", 0),
+                    video_start_sec=seg_data.get("video_start_sec", 0),
+                    analysis_json=seg_data.get("analysis"),
+                    recommendation=seg_data.get("recommendation"),
+                    severity_score=seg_data.get("severity_score", 0),
+                    severity_label=seg_data.get("severity_label", "LOW"),
+                    video_path=seg_data.get("video_path"),
+                    heatmap_path=seg_data.get("heatmap_path"),
+                    status=seg_data.get("status", "COMPLETED"),
+                )
+                
+                processed_segments.add(seg_index)
+                
+                seg_payload = dict(seg_data)
+                seg_payload.update(saved)
+                seg_payload["type"] = "segment"
+                seg_payload["status"] = "SEGMENT_DONE"
+                await push_analysis_segment_event(job_id, seg_payload)
+
+                # --- Hybrid Flow Analysis ---
+                flow_event = await FlowAnalysisService.process_segment(job_id, seg_payload)
+                if flow_event:
+                    await push_analysis_segment_event(job_id, flow_event)
+            except Exception as seg_err:
+                import logging
+                logging.getLogger(__name__).error(f"Failed to persist segment {seg_index}: {seg_err}")
+
+        async def redis_callback(data):
+            """Callback for Redis notifications."""
+            if data.get("type") == "segment":
+                logger.info(f"Received segment {data.get('segment_index')} via Redis")
+                await handle_segment_data(data.get("seg_result"))
+
+        # Start Redis notification task
+        notifier = RedisNotifier()
+        notification_task = asyncio.create_task(notifier.subscribe_to_analysis(job_id, redis_callback))
+
         async def progress_callback(response):
             if response.status == "SEGMENT_DONE":
                 try:
                     seg_data = json.loads(response.message)
-                    from services.segment_service import SegmentService
-                    from controllers.segment_controller import push_analysis_segment_event
-
-                    saved = SegmentService.insert_segment(
-                        analysis_id=job_id,
-                        match_id=match_id,
-                        segment_index=seg_data.get("segment_index", 0),
-                        start_sec=seg_data.get("start_sec", 0),
-                        end_sec=seg_data.get("end_sec", 0),
-                        video_start_sec=seg_data.get("video_start_sec", 0),
-                        analysis_json=seg_data.get("analysis"),
-                        recommendation=seg_data.get("recommendation"),
-                        severity_score=seg_data.get("severity_score", 0),
-                        severity_label=seg_data.get("severity_label", "LOW"),
-                        status=seg_data.get("status", "COMPLETED"),
-                    )
-                    seg_payload = dict(seg_data)
-                    seg_payload.update(saved)
-                    seg_payload["type"] = "segment"
-                    seg_payload["status"] = "SEGMENT_DONE"
-                    await push_analysis_segment_event(job_id, seg_payload)
-
-                    # --- Hybrid Flow Analysis ---
-                    flow_event = await FlowAnalysisService.process_segment(job_id, seg_payload)
-                    if flow_event:
-                        await push_analysis_segment_event(job_id, flow_event)
-                        
-                except Exception as seg_err:
-                    import logging
-
-                    logging.getLogger(__name__).error(f"Failed to persist segment: {seg_err}")
+                    await handle_segment_data(seg_data)
+                except Exception as e:
+                    logger.error(f"Failed to parse segment from gRPC: {e}")
             elif response.status == "TRACKING_VIDEO_READY":
                 # Tracking video is now available - store in DB for streaming
                 if response.result and response.result.tracking_video_path:
-                    from database import get_db
-                    db = await get_db().__aenter__()
+                    db_gen = get_db()
+                    db = next(db_gen)
                     try:
                         with db.cursor() as cursor:
                             cursor.execute(
@@ -446,12 +478,37 @@ async def run_tracking_analysis_job(
                                 ON DUPLICATE KEY UPDATE video_path = VALUES(video_path), frame_count = VALUES(frame_count)""",
                                 (job_id, response.result.tracking_video_path, response.result.total_frames),
                             )
-                        await db.commit()
+                        db.commit()
                     finally:
-                        db.close()
+                        try:
+                            next(db_gen)
+                        except StopIteration:
+                            pass
             elif response.status == "ALERT":
-                # Only stream tactical alerts; keep run status unchanged.
+                # Tactical alerts are already streamed via gRPC, keep for now as they are small
                 pass
+            elif response.status == "START":
+                # Get total segments if available
+                try:
+                    msg_data = json.loads(response.message)
+                    total_seg = msg_data.get("total_segments", 0)
+                except:
+                    total_seg = 0
+                db_gen = get_db()
+                db = next(db_gen)
+                try:
+                    with db.cursor() as cursor:
+                        cursor.execute(
+                            "UPDATE analysis_runs SET total_segments = %s WHERE id = %s",
+                            (total_seg, job_id)
+                        )
+                    db.commit()
+                finally:
+                    try:
+                        next(db_gen)
+                    except StopIteration:
+                        pass
+                _update_analysis_run(job_id, ANALYSIS_STATUS_PROCESSING, 0.0, f"Starting tracking on {total_seg} segments...")
             else:
                 mapped_status = normalize_status(response.status)
                 _update_analysis_run(
@@ -495,6 +552,13 @@ async def run_tracking_analysis_job(
             camera_type=camera_type,
             progress_callback=progress_callback,
         )
+        
+        # Cancel notification task
+        notification_task.cancel()
+        try:
+            await notification_task
+        except asyncio.CancelledError:
+            pass
 
         outputs = result.get("result", {})
 
@@ -645,7 +709,7 @@ async def get_analysis_status(analysis_id: str, db: Connection = Depends(get_db)
     with db.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, match_id, input_video_name, status, progress, message, submitted_at, completed_at
+            SELECT id, match_id, input_video_name, status, progress, message, submitted_at, completed_at, total_segments, outputs
             FROM analysis_runs
             WHERE id = %s AND generated_by = %s
             LIMIT 1
@@ -677,8 +741,9 @@ async def get_analysis_status(analysis_id: str, db: Connection = Depends(get_db)
         "input_video_name": row.get("input_video_name"),
         "status": row.get("status"),
         "progress": float(row.get("progress") or 0.0),
+        "total_segments": row.get("total_segments") or 0,
         "message": row.get("message") or "",
-        "outputs": outputs,
+        "outputs": {**_build_outputs_for_run(row["id"]), **(json.loads(row["outputs"]) if row.get("outputs") else {})},
         "input_video_path": f"temp_uploads/{os.path.basename(row['input_video_path'])}" if row.get("input_video_path") else None,
         "submitted_at": row["submitted_at"].isoformat() if row.get("submitted_at") else None,
         "completed_at": row["completed_at"].isoformat() if row.get("completed_at") else None,
@@ -699,7 +764,7 @@ async def get_analysis_history(db: Connection = Depends(get_db), current_user: U
     with db.cursor() as cursor:
         cursor.execute(
             """
-            SELECT id, match_id, input_video_name, status, progress, message, submitted_at, completed_at
+            SELECT id, match_id, input_video_name, status, progress, message, submitted_at, completed_at, total_segments, outputs
             FROM analysis_runs
             WHERE generated_by = %s
             ORDER BY submitted_at DESC
@@ -718,7 +783,7 @@ async def get_analysis_history(db: Connection = Depends(get_db), current_user: U
                 "status": row.get("status"),
                 "progress": float(row.get("progress") or 0.0),
                 "message": row.get("message") or "",
-                "outputs": _build_outputs_for_run(row["id"]),
+                "outputs": {**_build_outputs_for_run(row["id"]), **(json.loads(row["outputs"]) if row.get("outputs") else {})},
                 "submitted_at": row["submitted_at"].isoformat() if row.get("submitted_at") else None,
                 "completed_at": row["completed_at"].isoformat() if row.get("completed_at") else None,
             }
@@ -780,24 +845,33 @@ def _build_outputs_for_run(run_id: str) -> Dict[str, str]:
     """
     outputs: Dict[str, str] = {}
     
-    # Try NEW directory format first: outputs/analysis_{run_id}_{timestamp}/
+    # Check both ANALYSIS_OUTPUT_ROOT and ANALYSIS_OUTPUT_ROOT/outputs
     run_output_dir = None
-    outputs_base = ANALYSIS_OUTPUT_ROOT / "outputs"
-    if outputs_base.exists():
-        for item in outputs_base.iterdir():
+    search_dirs = [ANALYSIS_OUTPUT_ROOT]
+    if (ANALYSIS_OUTPUT_ROOT / "outputs").exists():
+        search_dirs.append(ANALYSIS_OUTPUT_ROOT / "outputs")
+    
+    for base in search_dirs:
+        for item in base.iterdir():
             if item.is_dir() and item.name.startswith(f"analysis_{run_id}_"):
                 run_output_dir = item
+                # Determine if we need the "outputs/" prefix for the relative path
+                path_prefix = "outputs/" if base.name == "outputs" else ""
                 break
+        if run_output_dir:
+            break
     
     if run_output_dir:
+        path_prefix = "outputs/" if run_output_dir.parent.name == "outputs" else ""
         candidates = {
-            "tracking_video_path": f"outputs/{run_output_dir.name}/tracking_output.mp4",
-            "tracking_json_path": f"outputs/{run_output_dir.name}/tracking_results.json",
-            "backline_video_path": f"outputs/{run_output_dir.name}/analytics/backline_analysis.mp4",
-            "heatmap_video_path": f"outputs/{run_output_dir.name}/heatmaps/heatmap_analysis.mp4",
-            "possession_analysis_path": f"outputs/{run_output_dir.name}/analytics/possession_analysis_results.json",
-            "animation_video_path": f"outputs/{run_output_dir.name}/analytics/tracking_animation.mp4",
-            "tactical_advisory_path": f"outputs/{run_output_dir.name}/analytics/tactical_advisory.json",
+            "tracking_video_path": f"{path_prefix}{run_output_dir.name}/tracking_output.mp4",
+            "tracking_json_path": f"{path_prefix}{run_output_dir.name}/tracking_results.json",
+            "backline_video_path": f"{path_prefix}{run_output_dir.name}/analytics/backline_analysis.mp4",
+            "heatmap_video_path": f"{path_prefix}{run_output_dir.name}/heatmaps/heatmap_analysis.mp4",
+            "possession_analysis_path": f"{path_prefix}{run_output_dir.name}/analytics/possession_analysis_results.json",
+            "animation_video_path": f"{path_prefix}{run_output_dir.name}/analytics/tracking_animation.mp4",
+            "tactical_advisory_path": f"{path_prefix}{run_output_dir.name}/analytics/tactical_advisory.json",
+            "heatmap_image_path": f"{path_prefix}{run_output_dir.name}/heatmaps/heatmap.png",
         }
         for key, rel_path in candidates.items():
             abs_path = ANALYSIS_OUTPUT_ROOT / rel_path

@@ -314,6 +314,19 @@ INSERT INTO tactical_alerts (id, match_id, alert_id, timestamp, severity_score, 
 (UUID(), @match_id_new, 'alert_002', '35:20', 0.65, 'HIGH', 'Spacing Anomaly', 'STRUCTURAL_COMPACTNESS_FIX', 'PENDING', 'Close vertical gaps between midfield and defense.', 2, 1, 'none'),
 (UUID(), @match_id_new, 'alert_003', '55:45', 0.45, 'MODERATE', 'Fatigue Warning', 'SUBSTITUTION_RECOMMENDATION', 'PENDING', 'Consider subbing out DM Zeta for fresh legs.', 5, 1, 'none');
 
+-- Insert Sample Analysis Run with Heatmap
+SET @run_id_1 = UUID();
+INSERT INTO analysis_runs (id, match_id, input_video_name, status, progress, tracking_video_path, outputs, submitted_at, completed_at, generated_by) VALUES
+(@run_id_1, @match_id_new, 'match_day_v1.mp4', 'COMPLETED', 1.0, 'processed/tracking_match_1.mp4', 
+ '{"heatmap_image_path": "processed/global_heatmap_1.png", "heatmap_video_path": "processed/heatmap_viz_1.mp4", "output_video": "processed/final_analysis_1.mp4"}',
+ NOW() - INTERVAL 1 DAY, NOW() - INTERVAL 23 HOUR, @user_id_new);
+
+-- Insert Sample Analysis Segments with Heatmaps
+INSERT INTO analysis_segments (id, match_id, segment_index, start_sec, end_sec, video_start_sec, analysis_json, recommendation, severity_score, severity_label, heatmap_path, status) VALUES
+(UUID(), @match_id_new, 0, 0, 15, 0, '{"team_a": {"width": 45.2, "compactness": 22.1, "defensive_line": 42.5}, "tactical_narrative": "High initial block with moderate compactness."}', 'Maintain high defensive line to squeeze midfield.', 0.2, 'LOW', 'processed/segments/heatmap_seg_0.png', 'COMPLETED'),
+(UUID(), @match_id_new, 1, 15, 30, 15, '{"team_a": {"width": 48.5, "compactness": 18.5, "defensive_line": 38.0}, "tactical_narrative": "Transitional phase with increasing width on the flanks."}', 'Exploit wide spaces behind their fullbacks.', 0.6, 'HIGH', 'processed/segments/heatmap_seg_1.png', 'COMPLETED'),
+(UUID(), @match_id_new, 2, 30, 45, 30, '{"team_a": {"width": 42.0, "compactness": 25.0, "defensive_line": 45.0}, "tactical_narrative": "Settled possession with strong central control."}', 'Rotate play quickly to disorganize their low block.', 0.4, 'MEDIUM', 'processed/segments/heatmap_seg_2.png', 'COMPLETED');
+
 -- ---------------------------------------------------------------------------
 -- Simulation-ready match seed (NO prefilled events/statistics/alerts)
 -- Use this match from Flutter "Run Fake Match" button to generate everything.

@@ -9,6 +9,10 @@ async def call_llm(prompt: str) -> str:
     Sends a prompt to the remote LLM service (Colab + ngrok).
     Expected response format: { "status": "ok", "response": "..." }
     """
+    if not REMOTE_LLM_URL:
+        logger.error("[LLMClient] REMOTE_LLM_URL is not configured. Skipping LLM call.")
+        raise Exception("REMOTE_LLM_URL is missing in configuration.")
+
     payload = { "prompt": prompt }
     
     try:
